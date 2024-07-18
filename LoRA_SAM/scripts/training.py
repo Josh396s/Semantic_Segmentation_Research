@@ -3,6 +3,7 @@ from transformers import SamProcessor
 from transformers import SamModel
 from SAM_Dataset import *
 from LoRA_Config import *
+from inference import *
 from torch.optim import Adam
 from statistics import mean
 from tqdm import tqdm
@@ -47,27 +48,26 @@ def main(num_epochs):
     test_img_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Images/*.png"
     train_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Train Set/Ground-truths/*.png"
     test_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Ground-truths/*.png"
-    train_img, test_imgs, train_mask, test_masks = read_images(train_img_path, test_img_path, train_mask_path, test_mask_path)
+    train_img, test_images, train_mask, test_masks = read_images(train_img_path, test_img_path, train_mask_path, test_mask_path)
     #Images Info
     print("Length of training raw images: " + str(len(train_img)) + "      Shape of an training raw image: " + str(train_img[0].shape))
     print("Length of training mask images: " + str(len(train_mask)) + "     Shape of an training mask image: " + str(train_mask[0].shape))
-    print("Length of test raw images: " + str(len(test_imgs)) + "       Shape of an test raw image: " + str(test_imgs[0].shape))
+    print("Length of test raw images: " + str(len(test_images)) + "       Shape of an test raw image: " + str(test_images[0].shape))
     print("Length of test mask images: " + str(len(test_masks)) + "      Shape of an test mask image: " + str(test_masks[0].shape))
 
     #Resize images to 256x256
     train_images = np.array(resize_images(train_img, False))
-    test_imgs = np.array(resize_images(test_imgs, False))
+    test_images = np.array(resize_images(test_images, False))
     train_masks = np.array(resize_images(train_mask, True))
     test_masks = np.array(resize_images(test_masks, True))
     #Shape of resized images
     print("Shape of resized training raw image: " + str(train_images.shape))
     print("Shape of resized training mask image: " + str(train_masks.shape))
-    print("Shape of resized testing raw image: " + str(test_imgs.shape))
+    print("Shape of resized testing raw image: " + str(test_images.shape))
     print("Shape of resized testing mask image: " + str(test_masks.shape))
 
     #Create training dataset
-    training_dataset = make_dataset(train_images, train_masks, True, 0.1)
-    #training_dataset = make_dataset(train_images, train_masks)
+    training_dataset = make_dataset(train_images, train_masks, True, 0.01)
     #Check dataset info
     print("Train Dataset Info:\n" + str(training_dataset))
 
@@ -77,8 +77,11 @@ def main(num_epochs):
     #Create instance of the SAMDataset class
     train_dataset = SAMDataset(dataset=training_dataset, processor=processor)
 
+########################################################################################################################################################################
+    #IF drop_last=False IT GIVES THE FOLLOWING ERROR: IndexError: index 1 is out of bounds for dimension 0 with size 1
+########################################################################################################################################################################
     #Create a Dataloader instance for the training
-    train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True, drop_last=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True, drop_last=True)
     
     #Load SAM model
     model = SamModel.from_pretrained("facebook/sam-vit-base")
@@ -99,7 +102,28 @@ def main(num_epochs):
     seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 
     #Train the model
-    train_model(model, train_dataloader, seg_loss, optimizer, 20)
+    train_model(model, train_dataloader, seg_loss, optimizer, 2)
+
+    #Save the model
+    # ckp = model.state_dict()
+    # PATH = "checkpoint.pt"
+    # torch.save(ckp, PATH)
+    # print(f"Training checkpoint saved at {PATH}")
+
+    #Inference
+    device = "cuda"
+    load_model(model, device)
+    plot_image(model, training_dataset, processor, device)
+    small_testing_dataset = make_dataset(test_images, test_masks, True, 0.01) #Smaller sample
+    #full_testing_dataset = make_dataset(test_images, test_masks, False, None) #Full dataset
+    small_test_iou = calculate_IOU(model, small_testing_dataset, device, processor)
+    #full_test_iou = calculate_IOU(model, full_testing_dataset, device, processor)
+    print(f"Average IoUs over {len(small_testing_dataset)} test sample: {small_test_iou}")
+    #print(f"Average IoUs over {len(full_testing_dataset)} test sample: {full_test_iou}")
+
+
+
+
 
 
 
