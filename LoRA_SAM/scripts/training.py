@@ -1,9 +1,11 @@
+from torch.utils.data import DataLoader
 from transformers import SamProcessor
 from transformers import SamModel
+from SAM_Dataset import *
+from LoRA_Config import *
+from torch.optim import Adam
 from statistics import mean
 from tqdm import tqdm
-from scripts.SAM_Dataset import *
-from scripts.LoRA_Config import *
 import argparse
 import random
 import torch
@@ -57,16 +59,15 @@ def main(num_epochs):
     test_imgs = np.array(resize_images(test_imgs, False))
     train_masks = np.array(resize_images(train_mask, True))
     test_masks = np.array(resize_images(test_masks, True))
-
-    #Print shape of resized images
+    #Shape of resized images
     print("Shape of resized training raw image: " + str(train_images.shape))
     print("Shape of resized training mask image: " + str(train_masks.shape))
     print("Shape of resized testing raw image: " + str(test_imgs.shape))
     print("Shape of resized testing mask image: " + str(test_masks.shape))
 
     #Create training dataset
-    training_dataset = make_dataset(train_images, train_masks)
-
+    training_dataset = make_dataset(train_images, train_masks, True, 0.1)
+    #training_dataset = make_dataset(train_images, train_masks)
     #Check dataset info
     print("Train Dataset Info:\n" + str(training_dataset))
 
@@ -76,6 +77,9 @@ def main(num_epochs):
     #Create instance of the SAMDataset class
     train_dataset = SAMDataset(dataset=training_dataset, processor=processor)
 
+    #Create a Dataloader instance for the training
+    train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True, drop_last=False)
+    
     #Load SAM model
     model = SamModel.from_pretrained("facebook/sam-vit-base")
     
@@ -90,7 +94,12 @@ def main(num_epochs):
     sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"LoRA-SAM total params: {sam_total_params}")
 
+    #Initialize the optimizer and loss function
+    optimizer = Adam(model.parameters(), lr=1e-5, weight_decay=0)
+    seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 
+    #Train the model
+    train_model(model, train_dataloader, seg_loss, optimizer, 20)
 
 
 
