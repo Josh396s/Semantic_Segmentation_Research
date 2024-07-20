@@ -1,13 +1,13 @@
 import loralib as lora
 
-def lora_config(model, rank):
+def lora_config(model, ranking):
     #VISION ENCODER
     #Patch embedding
     # model.vision_encoder.patch_embed.projection = lora.Conv2d(3, 768, kernel_size=16, stride=(16, 16), r = rank)
 
     for layer in model.vision_encoder.layers:
         #Attention block
-        layer.attn.qkv = lora.MergedLinear(768, 2304, r=rank, enable_lora=[True, True, True])
+        layer.attn.qkv = lora.MergedLinear(768, 2304, r=ranking, enable_lora=[True, True, True])
         # layer.attn.proj = lora.Linear(768, 768, r=rank)
 
         #MLP block
@@ -22,9 +22,9 @@ def lora_config(model, rank):
     # MASK DECODER -----------------------------------------------------------------------------------------------------------
     for layer in model.mask_decoder.transformer.layers:
         #Self attention block
-        layer.self_attn.q_proj = lora.Linear(256, 256, r=rank)
-        layer.self_attn.k_proj = lora.Linear(256, 256, r=rank)
-        layer.self_attn.v_proj = lora.Linear(256, 256, r=rank)
+        layer.self_attn.q_proj = lora.Linear(256, 256, r=ranking)
+        layer.self_attn.k_proj = lora.Linear(256, 256, r=ranking)
+        layer.self_attn.v_proj = lora.Linear(256, 256, r=ranking)
     #     layer.self_attn.out_proj = lora.Linear(256, 256, r=rank)
 
     #     #Cross attention block (Token -> Image)

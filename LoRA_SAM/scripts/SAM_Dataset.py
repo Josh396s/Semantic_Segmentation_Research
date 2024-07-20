@@ -7,12 +7,15 @@ import numpy as np
 import cv2
 
 #Function that reads in images/masks and returns them as an numpy array
-def read_images(train_img_path, test_img_path, train_mask_path, test_mask_path):
-  # Load all images in the current folder that end with .png
-  train_img = io.imread_collection(train_img_path)
-  test_img = io.imread_collection(test_img_path)
-  train_mask = io.imread_collection(train_mask_path)
-  test_mask = io.imread_collection(test_mask_path)
+def read_images(train_img_path, test_img_path, train_mask_path, test_mask_path, test=False):
+  if test:
+    train_img, train_mask = None, None
+    test_img = io.imread_collection(test_img_path)
+    test_mask = io.imread_collection(test_mask_path)
+  else:
+    test_img, test_mask = None, None
+    train_img = io.imread_collection(train_img_path)
+    train_mask = io.imread_collection(train_mask_path)
   return(train_img, test_img, train_mask, test_mask)
 
 #Function that resizes the image to (256, 256) for SAM input
