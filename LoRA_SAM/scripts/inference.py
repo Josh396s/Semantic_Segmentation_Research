@@ -150,7 +150,7 @@ def main(subset_size, model_path):
     trained_model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Original SAM total params: {original_sam_total_params}")
     print(f"LoRA-SAM total params: {trained_model_parameters}")
-    print(model)
+    # print(model)
     #load_model(model, device)
 
 

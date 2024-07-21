@@ -54,8 +54,9 @@ def train_model(model, train_dataloader, loss_func, optimizer, num_epochs, rank,
             # optimize
             optimizer.step()
             epoch_losses.append(loss.item())
-        print(f'EPOCH: {epoch}')
-        print(f'Mean loss: {mean(epoch_losses)}')
+            if rank == 0:
+                print(f'EPOCH: {epoch}')
+                print(f'Mean loss: {mean(epoch_losses)}')
         mean_epoch_loss.append(mean_epoch_loss)
     
     if rank == 0:
@@ -77,8 +78,8 @@ def main(rank:int, world_size:int, num_epochs:int, batch_size:int):
     #test_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Ground-truths/*.png"
     train_img, _, train_mask, _ = read_images(train_img_path, train_img_path, train_mask_path, train_img_path, test=False)
     #Images Info
-    print("Length of training raw images: " + str(len(train_img)) + "      Shape of an training raw image: " + str(train_img[0].shape))
-    print("Length of training mask images: " + str(len(train_mask)) + "     Shape of an training mask image: " + str(train_mask[0].shape))
+    # print("Length of training raw images: " + str(len(train_img)) + "      Shape of an training raw image: " + str(train_img[0].shape))
+    # print("Length of training mask images: " + str(len(train_mask)) + "     Shape of an training mask image: " + str(train_mask[0].shape))
     #print("Length of test raw images: " + str(len(test_images)) + "       Shape of an test raw image: " + str(test_images[0].shape))
     #print("Length of test mask images: " + str(len(test_masks)) + "      Shape of an test mask image: " + str(test_masks[0].shape))
 
@@ -88,15 +89,15 @@ def main(rank:int, world_size:int, num_epochs:int, batch_size:int):
     train_masks = np.array(resize_images(train_mask, True))
     #test_masks = np.array(resize_images(test_masks, True))
     #Shape of resized images
-    print("Shape of resized training raw image: " + str(train_images.shape))
-    print("Shape of resized training mask image: " + str(train_masks.shape))
+    # print("Shape of resized training raw image: " + str(train_images.shape))
+    # print("Shape of resized training mask image: " + str(train_masks.shape))
     #print("Shape of resized testing raw image: " + str(test_images.shape))
     #print("Shape of resized testing mask image: " + str(test_masks.shape))
 
     #Create training dataset
     training_dataset = make_dataset(train_images, train_masks, False, 0.01)
     #Check dataset info
-    print("Train Dataset Info:\n" + str(training_dataset))
+    # print("Train Dataset Info:\n" + str(training_dataset))
 
     #Initialize the processor
     processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
@@ -115,16 +116,16 @@ def main(rank:int, world_size:int, num_epochs:int, batch_size:int):
     model = SamModel.from_pretrained("facebook/sam-vit-base")
     
     #Original number of parameters
-    original_sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # original_sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     #Implement LoRA to model
     ranking = 3
     model = lora_config(model, ranking)
 
     #Print difference in parameters before/after LoRA
-    print(f"Original SAM total params: {original_sam_total_params}")
-    sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"LoRA-SAM total params: {sam_total_params}")
+    # print(f"Original SAM total params: {original_sam_total_params}")
+    # sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # print(f"LoRA-SAM total params: {sam_total_params}")
 
     #Initialize the optimizer and loss function
     optimizer = Adam(model.parameters(), lr=1e-5, weight_decay=0)
