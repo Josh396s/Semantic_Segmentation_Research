@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ML Checkpoints & Data
+*.pt
+*.pth
+*.checkpoint
+data/
