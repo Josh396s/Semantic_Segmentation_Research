@@ -21,6 +21,7 @@ This repository provides a framework for fine-tuning Meta AI’s **Segment Anyth
 To launch distributed training:
 ```bash
 python LoRA_SAM/scripts/training.py --epochs 10 --batch_size 4 --num_workers 4 --lora_rank 3 --data_root ./path_to_data
+```
 
 ## Dataset Used
 https://www.kaggle.com/datasets/aysendegerli/qatacov19-dataset/data
