@@ -1,35 +1,39 @@
-from skimage.transform import resize
-from datasets import Dataset
-from PIL import Image
+import numpy as np 
 import cv2
-import glob
-
-# Get paths for image and mask data
-def get_paths(img_dir, mask_dir):
-    img_paths = sorted(glob.glob(img_dir))
-    mask_paths = sorted(glob.glob(mask_dir))
-    return img_paths, mask_paths
+import torch
+from torch.utils.data import Dataset
 
 #Function that gets bounding boxes from masks
 def get_bounding_box(ground_truth_map):
-  # get bounding box from mask
+  """
+  This function takes a binary mask as input and returns a bounding box that encompasses the object in the mask.
+  Args:
+    ground_truth_map: 2D numpy array representing the binary mask of the object to be segmented
+  """
   y_indices, x_indices = np.where(ground_truth_map > 0)
+  
+  # Handle empty masks
+  if len(x_indices) == 0: # Handle empty masks
+    return [0, 0, 256, 256]
+  
+  # Get bounding box from mask
   x_min, x_max = np.min(x_indices), np.max(x_indices)
   y_min, y_max = np.min(y_indices), np.max(y_indices)
-  # add perturbation to bounding box coordinates
+
+  # Add perturbation to bounding box coordinates
   H, W = ground_truth_map.shape
   x_min = max(0, x_min - np.random.randint(0, 20))
   x_max = min(W, x_max + np.random.randint(0, 20))
   y_min = max(0, y_min - np.random.randint(0, 20))
   y_max = min(H, y_max + np.random.randint(0, 20))
-  bbox = [x_min, y_min, x_max, y_max]
-  return bbox
+
+  return [x_min, y_min, x_max, y_max]
 
 #Function that creates a SAMDataset to be used for training
 class SAMDataset(Dataset):
   """
   This class is used to create a dataset that serves input images and masks.
-  It takes an image path, mask path, and processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
+  It takes a dataset and a processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
   """
   def __init__(self, img_paths, mask_paths, processor):
     self.img_paths = img_paths
@@ -40,26 +44,26 @@ class SAMDataset(Dataset):
     return len(self.img_paths)
 
   def __getitem__(self, idx):
-    
-    # Change color to RGB and resize images 
+    # Load single image/mask from disk
     image = cv2.imread(self.img_paths[idx])
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = cv2.resize(image, (256, 256))
 
-    # Resize images 
     mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
-    mask = (cv2.resize(mask, (256, 256), interpolation=cv2.INTER_NEAREST) > 127).astype(np.uint8)
     
-    # Get bounding box prompt
-    prompt = [get_bounding_box(mask)]
+    # Resize to SAM's expected 256x256
+    image_resized = cv2.resize(image, (256, 256))
+    mask_resized = (cv2.resize(mask, (256, 256), interpolation=cv2.INTER_NEAREST) > 127).astype(np.uint8)
+    
+    # Get bounding box prompt from mask
+    prompt = [get_bounding_box(mask_resized)]
 
     # Prepare image and prompt for the model
-    inputs = self.processor(image, input_boxes=[prompt], return_tensors="pt")
-
-    # Remove batch dimension which the processor adds by default
-    inputs = {k:v.squeeze(0) for k,v in inputs.items()}
+    inputs = self.processor(image_resized, input_boxes=[prompt], return_tensors="pt")
     
-    # Add ground truth segmentation
-    inputs["ground_truth_mask"] = ground_truth_mask
+    # Remove batch dimension which the processor adds by default
+    inputs = {k: v.squeeze(0) for k, v in inputs.items()}
+    
+    # Add ground truth
+    inputs["ground_truth_mask"] = torch.from_numpy(mask_resized)
 
     return inputs

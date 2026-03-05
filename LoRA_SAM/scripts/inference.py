@@ -1,173 +1,146 @@
-from transformers import SamModel, SamProcessor
-from torch.utils.data import DataLoader
-from statistics import mean
-from SAM_Dataset import *
-from LoRA_Config import *
-import matplotlib.pyplot as plt
+import torch
 import numpy as np
+import cv2
+import os
+import glob
 import argparse
 import random
-import torch
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+from transformers import SamModel, SamProcessor
+from SAM_Dataset import SAMDataset, get_paths
+from LoRA_Config import lora_config
 
-#Function that loads the model into the device
-def load_model(model, device):
-    model.to(device)
-
-#Function that calculates the IOU of given examples
 def calculateIoU(ground_mask, pred_mask):
-        # Calculate the TP, FP, FN
-        TP = 0
-        FP = 0
-        FN = 0
-        for i in range(len(ground_mask)):
-            for j in range(len(ground_mask[0])):
-                if ground_mask[i][j] == 1 and pred_mask[i][j] == 1:
-                    TP += 1
-                elif ground_mask[i][j] == 0 and pred_mask[i][j] == 1:
-                    FP += 1
-                elif ground_mask[i][j] == 1 and pred_mask[i][j] == 0:
-                    FN += 1
-        # Calculate IoU
-        iou = TP / (TP + FP + FN)
-        return iou
+    """
+    Calculate the Intersection over Union (IoU) between two binary masks.
+    Args:
+        ground_mask (numpy array): The ground truth binary mask.
+        pred_mask (numpy array): The predicted binary mask.
+    Returns:
+        float: The IoU score between the two masks.
+    """
+    intersection = np.logical_and(ground_mask, pred_mask).sum()
+    union = np.logical_or(ground_mask, pred_mask).sum()
+    if union == 0:
+        return 0
+    return intersection / union
 
 #Function that runs the IOU over testing examples and returns the value
-def calculate_IOU(model, dataset, device, processor):
-    test_ious = []
+def run_evaluation(model, dataloader, device):
+    """
+    Evaluate the model on the given dataset and calculate the average IoU.
+    Args:
+        model (torch.nn.Module): The trained model to evaluate.
+        dataset (SAMDataset): The dataset to evaluate on.
+        device (torch.device): The device to run the evaluation on.
+        processor (SamProcessor): The processor for preparing inputs for the model.
+    Returns:
+        float: The average IoU score over the dataset.
+    """
     model.eval()
     model.to(device)
-    for idx, sample in enumerate(dataset):
-        # Get Image and ground truth mask
-        image = sample["image"]
-        ground_truth_mask = np.array(sample["mask"])
+    ious = []
+    
+    print(f"Running evaluation on {len(dataloader.dataset)} images...")
+    with torch.no_grad():
+        for batch in dataloader:
+            # Forward pass
+            outputs = model(
+                pixel_values=batch["pixel_values"].to(device),
+                input_boxes=batch["input_boxes"].to(device),
+                multimask_output=False
+            )
+            
+            # Post-process predictions
+            pred_masks = torch.sigmoid(outputs.pred_masks.squeeze(1))
+            pred_masks = (pred_masks.cpu().numpy() > 0.5).astype(np.uint8)
+            
+            # Ground truth from batch
+            gt_masks = batch["ground_truth_mask"].numpy()
+            
+            # Calculate IoU for each image in the batch
+            for i in range(pred_masks.shape[0]):
+                ious.append(calculateIoU(gt_masks[i], pred_masks[i].squeeze()))
+                
+    return np.mean(ious)
 
-        # get box prompt based on ground truth segmentation map
-        prompt = get_bounding_box(ground_truth_mask)
-
-        # prepare image + box prompt for the model
-        inputs = processor(image, input_boxes=[[prompt]], return_tensors="pt").to(device)
-        #inputs = {k:v.squeeze(0) for k,v in inputs.items()}
-
-        # forward pass
-        with torch.no_grad():
-          outputs = model(**inputs, multimask_output=False)
-        # apply sigmoid
-        medsam_seg_prob = torch.sigmoid(outputs.pred_masks.squeeze(1))
-        # convert soft mask to hard mask
-        medsam_seg_prob = medsam_seg_prob.cpu().numpy().squeeze()
-        medsam_seg = (medsam_seg_prob > 0.5).astype(np.uint8)
-
-        iou = calculateIoU(ground_truth_mask, medsam_seg)
-        test_ious.append(iou)
-    return mean(test_ious)
-
-#Function that places label on top of image
-def show_mask(mask, ax, random_color=False):
-    if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
-    else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])
-    h, w = mask.shape[-2:]
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
-
-
-#Function that plots the image with the label
-def plot_image(model, training_dataset, processor, device):
-    # let's take a random training example
-    idx = random.randint(0, len(training_dataset)-1)
-
-    # load image
-    test_image = training_dataset[idx]["image"]
-    test_image = np.array(test_image.convert("RGB"))
-
-    # get box prompt based on ground truth segmentation map
-    ground_truth_mask = np.array(training_dataset[idx]["mask"])
-    prompt = get_bounding_box(ground_truth_mask)
-
-    # prepare image + box prompt for the model
-    inputs = processor(test_image, input_boxes=[[prompt]], return_tensors="pt")
-
-    # Move the input tensor to the GPU if it's not already there
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-
+def visualize_prediction(model, dataset, device):
+    """
+    Visualize a random prediction from the model on the dataset.
+    Args:
+        model (torch.nn.Module): The trained model to evaluate.
+        dataset (SAMDataset): The dataset to evaluate on.
+        device (torch.device): The device to run the evaluation on.
+        processor (SamProcessor): The processor for preparing inputs for the model.
+    """
+    idx = random.randint(0, len(dataset) - 1)
+    sample = dataset[idx]
+    
+    # Prepare input
+    inputs = {k: v.unsqueeze(0).to(device) for k, v in sample.items() if k != "ground_truth_mask"}
+    
+    # Get prediction
     model.eval()
-
-    # forward pass
     with torch.no_grad():
         outputs = model(**inputs, multimask_output=False)
-
-    # apply sigmoid
-    medsam_seg_prob = torch.sigmoid(outputs.pred_masks.squeeze(1))
-    # convert soft mask to hard mask
-    medsam_seg_prob = medsam_seg_prob.cpu().numpy().squeeze()
-    medsam_seg = (medsam_seg_prob > 0.5).astype(np.uint8)
-
-
-    fig, axes = plt.subplots(1, 3, figsize=(20, 10))
-
-    # Plot the first image on the left
-    axes[0].imshow(test_image, cmap='gray')  # Assuming the first image is grayscale
-    show_mask(np.array(ground_truth_mask), axes[0])
-    axes[0].set_title("Ground Truth Mask")
-
-    # Plot the second image on the right
-    axes[1].imshow(test_image, cmap='gray')  # Assuming the second image is grayscale
-    show_mask(np.array(medsam_seg), axes[1])
-    axes[1].set_title("Predicted Mask")
-
-    # Hide axis ticks and labels
-    for ax in axes:
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-    # Display the images side by side
+    
+    # Process prediction
+    pred_mask = (torch.sigmoid(outputs.pred_masks).cpu().numpy() > 0.5).astype(np.uint8).squeeze()
+    gt_mask = sample["ground_truth_mask"].numpy()
+    
+    # Plotting
+    _, axes = plt.subplots(1, 2, figsize=(12, 6))
+    axes[0].imshow(gt_mask, cmap='gray')
+    axes[0].set_title("Ground Truth")
+    axes[1].imshow(pred_mask, cmap='gray')
+    axes[1].set_title("LoRA-SAM Prediction")
+    for ax in axes: ax.axis('off')
     plt.show()
 
-
-
-
-def main(subset_size, model_path):
-    test_img_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Images/*.png"
-    test_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Ground-truths/*.png"
-    _, test_images, _, test_masks = read_images(test_img_path, test_img_path, test_mask_path, test_mask_path, test=True)
-    test_images = np.array(resize_images(test_images, False))
-    test_masks = np.array(resize_images(test_masks, True))
-    # testing_dataset = make_dataset(test_images, test_masks, False, 0.01)
-    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
-    # test_dataset = SAMDataset(dataset=testing_dataset, processor=processor)
-    # test_dataloader = DataLoader(test_dataset, drop_last=False, shuffle=False)
-    
+def main(args):
+    """
+    Main function to run the evaluation and optional visualization.
+    Args:
+        args: Command-line arguments containing model path, data root, batch size, LoRA rank, and visualization flag.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    #Get Paths and Initialize Dataset
+    test_img_list, test_mask_list = get_paths(
+        os.path.join(args.data_root, "Test Set/Images/*.png"),
+        os.path.join(args.data_root, "Test Set/Ground-truths/*.png")
+    )
+    
+    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+    test_dataset = SAMDataset(test_img_list, test_mask_list, processor)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+    
+    # Load Model and LoRA Weights
     model = SamModel.from_pretrained("facebook/sam-vit-base")
-    original_sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    model = lora_config(model, ranking=3)
-    state_dict = torch.load(model_path)
+    model = lora_config(model, args.lora_rank)
+    
+    # Load your trained checkpoint
+    print(f"Loading checkpoint from {args.model_path}...")
+    state_dict = torch.load(args.model_path, map_location=device)
     model.load_state_dict(state_dict, strict=False)
-    model.to(device)
-    trained_model_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Original SAM total params: {original_sam_total_params}")
-    print(f"LoRA-SAM total params: {trained_model_parameters}")
-    # print(model)
-    #load_model(model, device)
-
-
-    #plot_image(trained_model, training_dataset, processor, device)
-    small_testing_dataset = make_dataset(test_images, test_masks, True, subset_size) #Smaller sample
-    full_testing_dataset = make_dataset(test_images, test_masks, False, None) #Full dataset
-    small_test_iou = calculate_IOU(model, small_testing_dataset, device, processor)
-    full_test_iou = calculate_IOU(model, full_testing_dataset, device, processor)
-    print(f"Average IoUs over {len(small_testing_dataset)} test sample: {small_test_iou}")
-    print(f"Average IoUs over {len(full_testing_dataset)} test sample: {full_test_iou}")
-
-
+    
+    # Evaluate
+    avg_iou = run_evaluation(model, test_dataloader, device)
+    print(f"Finished! Average IoU on Test Set: {avg_iou:.4f}")
+    
+    # Optional Visualization
+    if args.visualize:
+        visualize_prediction(model, test_dataset, device)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='LoRA_SAM model evaluation')
-    parser.add_argument('subset_size', default=0.05, type=float, help='Size of the subset of the dataset to use for evaluation (must be a float between (0.0,1.0))')
-    parser.add_argument('model_path', type=str, help='Path of the trained model')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, required=True, help="Path to checkpoint.pt")
+    parser.add_argument('--data_root', type=str, required=True, help="Root of QaTa-COV19 dataset")
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--lora_rank', type=int, default=3)
+    parser.add_argument('--visualize', action='store_true', help="Plot a random result after eval")
     args = parser.parse_args()
     
-    main(args.subset_size, args.model_path)
+    main(args)

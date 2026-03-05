@@ -4,7 +4,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from transformers import SamProcessor
 from transformers import SamModel
-from inference import calculate_IOU, load_model
 from SAM_Dataset import *
 from LoRA_Config import *
 from torch.optim import Adam
@@ -14,12 +13,13 @@ import torch.multiprocessing as mp
 import argparse
 import torch
 import monai
-import sys
+import glob
 import os
 
 #Setup process group for DDP
 def ddp_setup(rank, world_size):
     """
+    This function sets up the process group for distributed data parallel training.
     Args:
         rank: Unique identifier of each process
         world_size: Total number of processes
@@ -28,10 +28,19 @@ def ddp_setup(rank, world_size):
     os.environ['MASTER_PORT'] = '12355'
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def train_model(model, train_dataloader, loss_func, optimizer, num_epochs, rank, ranking):
+def train_model(model, train_dataloader, loss_func, optimizer, num_epochs, rank):
+    """
+    This function trains the LoRA-SAM model using distributed data parallel training
+    Args:
+        model: The LoRA-SAM model to be trained
+        train_dataloader: Dataloader instance for the training dataset
+        loss_func: Loss function to be used for training
+        optimizer: Optimizer to be used for training
+        num_epochs: Number of epochs to train for
+        rank: Unique identifier of each process
+    """
     mean_epoch_loss = []
 
-    #device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(rank)
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     model.train()
@@ -54,10 +63,10 @@ def train_model(model, train_dataloader, loss_func, optimizer, num_epochs, rank,
             # optimize
             optimizer.step()
             epoch_losses.append(loss.item())
-            if rank == 0:
-                print(f'EPOCH: {epoch}')
-                print(f'Mean loss: {mean(epoch_losses)}')
-        mean_epoch_loss.append(mean_epoch_loss)
+        if rank == 0:
+            print(f'EPOCH: {epoch}')
+            print(f'Mean loss: {mean(epoch_losses)}')
+        mean_epoch_loss.append(mean(epoch_losses))
     
     if rank == 0:
         #Save the model
@@ -67,83 +76,75 @@ def train_model(model, train_dataloader, loss_func, optimizer, num_epochs, rank,
         print(f"Training checkpoint saved at {PATH}")
 
 
-def main(rank:int, world_size:int, num_epochs:int, batch_size:int):
+def main(rank: int, world_size: int, num_epochs: int, batch_size: int, num_workers: int, lora_rank: int, data_root: str):
+    """
+    Main function for the distributed training job. This function is called by each process
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+        num_epochs: Number of epochs to train for
+        batch_size: Batch size to be used for training
+        num_workers: Number of workers to be used for the dataloader
+        data_root: Path to the dataset folder
+    """
     #Create process group
     ddp_setup(rank, world_size)
 
     #Read in Images
-    train_img_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Train Set/Images/*.png"
-    #test_img_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Images/*.png"
-    train_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Train Set/Ground-truths/*.png"
-    #test_mask_path = "/home/cahsi/Josh/Semantic_Segmentation_Research/LoRA_SAM/qatacov19-dataset/QaTa-COV19/QaTa-COV19-v2/Test Set/Ground-truths/*.png"
-    train_img, _, train_mask, _ = read_images(train_img_path, train_img_path, train_mask_path, train_img_path, test=False)
-    #Images Info
-    # print("Length of training raw images: " + str(len(train_img)) + "      Shape of an training raw image: " + str(train_img[0].shape))
-    # print("Length of training mask images: " + str(len(train_mask)) + "     Shape of an training mask image: " + str(train_mask[0].shape))
-    #print("Length of test raw images: " + str(len(test_images)) + "       Shape of an test raw image: " + str(test_images[0].shape))
-    #print("Length of test mask images: " + str(len(test_masks)) + "      Shape of an test mask image: " + str(test_masks[0].shape))
+    train_img_path = os.path.join(data_root, "Train Set/Images/*.png")
+    train_mask_path = os.path.join(data_root, "Train Set/Ground-truths/*.png")
 
-    #Resize images to 256x256
-    train_images = np.array(resize_images(train_img, False))
-    #test_images = np.array(resize_images(test_images, False))
-    train_masks = np.array(resize_images(train_mask, True))
-    #test_masks = np.array(resize_images(test_masks, True))
-    #Shape of resized images
-    # print("Shape of resized training raw image: " + str(train_images.shape))
-    # print("Shape of resized training mask image: " + str(train_masks.shape))
-    #print("Shape of resized testing raw image: " + str(test_images.shape))
-    #print("Shape of resized testing mask image: " + str(test_masks.shape))
-
-    #Create training dataset
-    training_dataset = make_dataset(train_images, train_masks, False, 0.01)
-    #Check dataset info
-    # print("Train Dataset Info:\n" + str(training_dataset))
+    # Get list of paths
+    train_img_list = sorted(glob.glob(train_img_path))
+    train_mask_list = sorted(glob.glob(train_mask_path))
+    
+    # Sanity check to ensure we have data
+    if len(train_img_list) == 0:
+        raise ValueError(f"No images found at {train_img_path}. Check your --data_root path!")
 
     #Initialize the processor
     processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
 
-    #Create instance of the SAMDataset class
-    train_dataset = SAMDataset(dataset=training_dataset, processor=processor)
+    #Create training dataset
+    training_dataset = SAMDataset(img_paths=train_img_list, mask_paths=train_mask_list, processor=processor)
 
-########################################################################################################################################################################
-    #IF drop_last=False IT GIVES THE FOLLOWING ERROR: IndexError: index 1 is out of bounds for dimension 0 with size 1
-########################################################################################################################################################################
     #Create a Dataloader instance for the training
-    sampler = DistributedSampler(train_dataset,num_replicas=world_size,rank=rank, shuffle=False, drop_last=False)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=True, num_workers=batch_size, drop_last=False, shuffle=False, sampler=sampler)
-    
+    sampler = DistributedSampler(training_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
+    train_dataloader = DataLoader(training_dataset, batch_size=batch_size, pin_memory=True, num_workers=num_workers, drop_last=False, shuffle=False, sampler=sampler)
+
     #Load SAM model
     model = SamModel.from_pretrained("facebook/sam-vit-base")
     
     #Original number of parameters
-    # original_sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    original_sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     #Implement LoRA to model
-    ranking = 3
-    model = lora_config(model, ranking)
+    model = lora_config(model, lora_rank)
 
     #Print difference in parameters before/after LoRA
-    # print(f"Original SAM total params: {original_sam_total_params}")
-    # sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    # print(f"LoRA-SAM total params: {sam_total_params}")
+    if rank == 0:
+        print(f"Original SAM total params: {original_sam_total_params}")
+        sam_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"LoRA-SAM total params: {sam_total_params}")
 
     #Initialize the optimizer and loss function
     optimizer = Adam(model.parameters(), lr=1e-5, weight_decay=0)
     seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 
     #Train the model
-    train_model(model, train_dataloader, seg_loss, optimizer, num_epochs, rank, ranking)
+    train_model(model, train_dataloader, seg_loss, optimizer, num_epochs, rank)
 
     #Destroy process group
     destroy_process_group()
 
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='LoRA_SAM distributed training job')
-    parser.add_argument('total_epochs', type=int, help='Total epochs to train the model')
-    parser.add_argument('batch_size', default=32, type=int, help='Input batch size on each device (default: 32)')
+    parser.add_argument('total_epochs', type=int, default=10)
+    parser.add_argument('batch_size', type=int, default=4)
+    parser.add_argument('num_workers', type=int, default=4)
+    parser.add_argument('lora_rank', type=int, default=3)
+    parser.add_argument('--data_root', type=str, default="./data", help="Path to the dataset folder")
     args = parser.parse_args()
     
     world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(world_size, args.total_epochs, args.batch_size), nprocs=world_size)
+    mp.spawn(main, args=(world_size, args.total_epochs, args.batch_size, args.num_workers, args.lora_rank, args.data_root), nprocs=world_size)
