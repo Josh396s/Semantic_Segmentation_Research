@@ -1,57 +1,14 @@
 from skimage.transform import resize
 from datasets import Dataset
-import matplotlib.pyplot as plt
-from skimage import io
 from PIL import Image
-import numpy as np 
 import cv2
+import glob
 
-#Function that reads in images/masks and returns them as an numpy array
-def read_images(train_img_path, test_img_path, train_mask_path, test_mask_path, test=False):
-  if test:
-    train_img, train_mask = None, None
-    test_img = io.imread_collection(test_img_path)
-    test_mask = io.imread_collection(test_mask_path)
-  else:
-    test_img, test_mask = None, None
-    train_img = io.imread_collection(train_img_path)
-    train_mask = io.imread_collection(train_mask_path)
-  return(train_img, test_img, train_mask, test_mask)
-
-#Function that resizes the image to (256, 256) for SAM input
-def resize_images(images, mask):
-  output = []
-  if mask:
-      for mask in images:
-          # Perform resizing with nearest neighbor interpolation to maintain binary values
-          resized_mask = (resize(mask, (256, 256), order=0, anti_aliasing=False) > 0.5).astype(np.uint8)
-          output.append(resized_mask)
-  else:
-      for image in images:
-          image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-          resized_image = resize(image, (256, 256), anti_aliasing=False)
-          output.append(resized_image)
-  return output
-
-#Function that creates a dataset of the images/masks
-def make_dataset(images, masks, subset=False, subset_size=0.2):
-  if subset:
-    sub = int(len(images)*subset_size)
-    num_imgs = images[:sub]
-    num_labels = masks[:sub]
-    img = [Image.fromarray((img * 255).astype(np.uint8)) for img in num_imgs]
-    label = [Image.fromarray(mask) for mask in num_labels]
-  else:
-    img = [Image.fromarray((img * 255).astype(np.uint8)) for img in images]
-    label = [Image.fromarray(mask) for mask in masks]
-
-  # Convert the NumPy arrays to Pillow images and store them in a dictionary
-  training_dataset_dict = {
-    "image": img,
-    "mask": label,
-  }
-  training_dataset = Dataset.from_dict(training_dataset_dict)
-  return training_dataset
+# Get paths for image and mask data
+def get_paths(img_dir, mask_dir):
+    img_paths = sorted(glob.glob(img_dir))
+    mask_paths = sorted(glob.glob(mask_dir))
+    return img_paths, mask_paths
 
 #Function that gets bounding boxes from masks
 def get_bounding_box(ground_truth_map):
@@ -72,29 +29,37 @@ def get_bounding_box(ground_truth_map):
 class SAMDataset(Dataset):
   """
   This class is used to create a dataset that serves input images and masks.
-  It takes a dataset and a processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
+  It takes an image path, mask path, and processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
   """
-  def __init__(self, dataset, processor):
-    self.dataset = dataset
+  def __init__(self, img_paths, mask_paths, processor):
+    self.img_paths = img_paths
+    self.mask_paths = mask_paths
     self.processor = processor
 
   def __len__(self):
-    return len(self.dataset)
+    return len(self.img_paths)
 
   def __getitem__(self, idx):
-    image = self.dataset[idx]["image"]
-    ground_truth_mask = [np.array(i) for i in self.dataset[idx]["mask"]]
+    
+    # Change color to RGB and resize images 
+    image = cv2.imread(self.img_paths[idx])
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = cv2.resize(image, (256, 256))
 
-    # get bounding box prompt
-    prompt = [[get_bounding_box(i)] for i in ground_truth_mask]
+    # Resize images 
+    mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+    mask = (cv2.resize(mask, (256, 256), interpolation=cv2.INTER_NEAREST) > 127).astype(np.uint8)
+    
+    # Get bounding box prompt
+    prompt = [get_bounding_box(mask)]
 
-    # prepare image and prompt for the model
-    inputs = self.processor(image, input_boxes=prompt, return_tensors="pt")
+    # Prepare image and prompt for the model
+    inputs = self.processor(image, input_boxes=[prompt], return_tensors="pt")
 
-    # remove batch dimension which the processor adds by default
+    # Remove batch dimension which the processor adds by default
     inputs = {k:v.squeeze(0) for k,v in inputs.items()}
     
-    # add ground truth segmentation
+    # Add ground truth segmentation
     inputs["ground_truth_mask"] = ground_truth_mask
 
     return inputs
